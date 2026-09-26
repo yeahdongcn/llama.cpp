@@ -31,40 +31,28 @@ permissions:
 
 jobs:
   create_tag:
-    name: Create and push git tag
+    # TEST BRANCH ONLY: the fork has no DEPLOY_KEY_RELEASE secret, so tag
+    # creation is replaced by a static ref. Consumers only use source_tag as a
+    # checkout ref and as the image version/build-number label.
+    name: Create and push git tag (stubbed for fork test)
     runs-on: ubuntu-slim
-    permissions:
-      contents: write
     outputs:
       source_tag: ${{ steps.srctag.outputs.name }}
 
     steps:
-      - name: Clone
-        id: checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          ssh-key: ${{ secrets.DEPLOY_KEY_RELEASE }}
-
-      - name: Determine source tag name
+      - name: Use the dispatched branch as the source ref
         id: srctag
-        uses: ./.github/actions/get-tag-name
-        env:
-          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
-
-      - name: Create and push git tag
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          git tag ${{ steps.srctag.outputs.name }} || exit 0
-          git push origin ${{ steps.srctag.outputs.name }} || exit 0
+        run: echo "name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
 
   build_ui:
-    name: Build UI
+    # TEST BRANCH ONLY: ui-build.yml publishes UI release artifacts. The musa
+    # Dockerfile builds the UI in its own `web` stage, so skip this job here.
+    name: Build UI (skipped for fork test)
     needs: create_tag
-    uses: ./.github/workflows/ui-build.yml
-    with:
-      ui_version: ${{ needs.create_tag.outputs.source_tag }}
+    runs-on: ubuntu-slim
+    steps:
+      - name: No-op
+        run: echo "skipped for fork test"
 
   prepare_matrices:
     name: Prepare Docker matrices
@@ -82,22 +70,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Keep all build targets in one place and derive merge targets from it.
+          # TEST BRANCH ONLY: trimmed to the musa row so the fork run exercises
+          # only the musa Dockerfile, i.e. exactly the job that fails upstream.
           cat > build-matrix.json <<'JSON'
           [
-            { "tag": "cpu", "dockerfile": ".devops/cpu.Dockerfile", "platforms": "linux/amd64", "full": true, "light": true, "server": true, "free_disk_space": false, "runs_on": "ubuntu-24.04" },
-            { "tag": "cpu", "dockerfile": ".devops/cpu.Dockerfile", "platforms": "linux/arm64", "full": true, "light": true, "server": true, "free_disk_space": false, "runs_on": "ubuntu-24.04-arm" },
-            { "tag": "cpu", "dockerfile": ".devops/s390x.Dockerfile", "platforms": "linux/s390x", "full": true, "light": true, "server": true, "free_disk_space": false, "runs_on": "ubuntu-24.04-s390x", "prebuilt_ui": true },
-            { "tag": "cuda cuda12", "dockerfile": ".devops/cuda.Dockerfile", "cuda_version": "12.8.1", "platforms": "linux/amd64", "full": true, "light": true, "server": true, "free_disk_space": true, "runs_on": "ubuntu-24.04" },
-            { "tag": "cuda cuda12", "dockerfile": ".devops/cuda.Dockerfile", "cuda_version": "12.8.1", "platforms": "linux/arm64", "full": true, "light": true, "server": true, "free_disk_space": true, "runs_on": "ubuntu-24.04-arm" },
-            { "tag": "cuda13", "dockerfile": ".devops/cuda.Dockerfile", "cuda_version": "13.4.1", "platforms": "linux/amd64", "full": true, "light": true, "server": true, "free_disk_space": true, "runs_on": "ubuntu-24.04" },
-            { "tag": "cuda13", "dockerfile": ".devops/cuda.Dockerfile", "cuda_version": "13.4.1", "platforms": "linux/arm64", "full": true, "light": true, "server": true, "free_disk_space": true, "runs_on": "ubuntu-24.04-arm" },
-            { "tag": "musa", "dockerfile": ".devops/musa.Dockerfile", "platforms": "linux/amd64", "full": true, "light": true, "server": true, "free_disk_space": true, "runs_on": "ubuntu-24.04" },
-            { "tag": "intel", "dockerfile": ".devops/intel.Dockerfile", "platforms": "linux/amd64", "full": true, "light": true, "server": true, "free_disk_space": true, "runs_on": "ubuntu-24.04" },
-            { "tag": "vulkan", "dockerfile": ".devops/vulkan.Dockerfile", "platforms": "linux/amd64", "full": true, "light": true, "server": true, "free_disk_space": false, "runs_on": "ubuntu-24.04" },
-            { "tag": "vulkan", "dockerfile": ".devops/vulkan.Dockerfile", "platforms": "linux/arm64", "full": true, "light": true, "server": true, "free_disk_space": false, "runs_on": "ubuntu-24.04-arm" },
-            { "tag": "rocm", "dockerfile": ".devops/rocm.Dockerfile", "platforms": "linux/amd64", "full": true, "light": true, "server": true, "free_disk_space": true, "runs_on": "ubuntu-24.04" },
-            { "tag": "openvino", "dockerfile": ".devops/openvino.Dockerfile", "platforms": "linux/amd64", "full": true, "light": true, "server": true, "free_disk_space": false, "runs_on": "ubuntu-24.04" }
+            { "tag": "musa", "dockerfile": ".devops/musa.Dockerfile", "platforms": "linux/amd64", "full": true, "light": true, "server": true, "free_disk_space": true, "runs_on": "ubuntu-24.04" }
           ]
           JSON
 
