@@ -10,6 +10,13 @@
 name: Publish Docker image
 
 on:
+  # TEST BRANCH ONLY: this fork has docker.yml on master but GitHub never
+  # registered it, so workflow_dispatch answers "workflow not found on the
+  # default branch". A branch-scoped push trigger runs the branch's copy of the
+  # workflow without touching the default branch or any fork setting.
+  push:
+    branches:
+      - xd/docker-musa-test
   workflow_dispatch: # allows manual triggering
     inputs:
       skip_s390x:
