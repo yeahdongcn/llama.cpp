@@ -52,7 +52,7 @@ jobs:
         # The value is used both as a checkout ref and as the version suffix of
         # the merged image tags, so it has to be a git ref that is also a valid
         # Docker tag (no slashes). Pushed as a git tag on this same commit.
-        run: echo "name=b-forktest" >> "$GITHUB_OUTPUT"
+        run: echo "name=b-forktest4" >> "$GITHUB_OUTPUT"
 
   build_ui:
     # TEST BRANCH ONLY: ui-build.yml publishes UI release artifacts. The musa
