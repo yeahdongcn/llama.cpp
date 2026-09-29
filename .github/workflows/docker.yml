@@ -16,7 +16,7 @@ on:
   # workflow without touching the default branch or any fork setting.
   push:
     branches:
-      - xd/docker-musa-sdk-test
+      - xd/docker-musa-sdk-test4
   workflow_dispatch: # allows manual triggering
     inputs:
       skip_s390x:
