@@ -221,6 +221,7 @@ option(GGML_HIP_EXPORT_METRICS              "ggml: enable kernel perf metrics ou
 option(GGML_MUSA_GRAPHS                     "ggml: use MUSA graph, experimental, unstable"    OFF)
 option(GGML_MUSA_MUDNN_COPY                 "ggml: enable muDNN for accelerated copy"         OFF)
 option(GGML_MUSA_MUDNN_MM_Q                 "ggml: enable muDNN for quantized matrix multiplication" OFF)
+option(GGML_MUSA_VEC_OPS                    "ggml: enable vectorized MUSA kernels for memory-bound ops (softmax, GLU, dim0-contiguous copies)" OFF)
 option(GGML_VULKAN                          "ggml: use Vulkan"                                OFF)
 option(GGML_VULKAN_CHECK_RESULTS            "ggml: run Vulkan op checks"                      OFF)
 option(GGML_VULKAN_DEBUG                    "ggml: enable Vulkan debug output"                OFF)

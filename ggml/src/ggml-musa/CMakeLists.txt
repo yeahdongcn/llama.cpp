@@ -57,6 +57,13 @@ if (MUSAToolkit_FOUND)
         add_compile_definitions(GGML_MUSA_MUDNN_MM_Q)
     endif()
 
+    if (GGML_MUSA_VEC_OPS)
+        set(SRCS "../ggml-musa/musa-ops.cu")
+        list(APPEND GGML_SOURCES_MUSA ${SRCS})
+        list(APPEND GGML_HEADERS_MUSA "../ggml-musa/musa-ops.cuh")
+        add_compile_definitions(GGML_MUSA_VEC_OPS)
+    endif()
+
     ggml_cuda_fattn_vec_instances(${CMAKE_CURRENT_SOURCE_DIR}/../ggml-cuda SRCS)
     list(APPEND GGML_SOURCES_MUSA ${SRCS})
 
