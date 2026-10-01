@@ -1,6 +1,9 @@
 #include "common.cuh"
 #include "ggml.h"
 #include "softmax.cuh"
+#if defined(GGML_USE_MUSA) && defined(GGML_MUSA_VEC_OPS)
+#include "ggml-musa/musa-ops.cuh"
+#endif // GGML_USE_MUSA && GGML_MUSA_VEC_OPS
 
 #ifdef GGML_USE_HIP
 #include <hip/hip_cooperative_groups.h>
@@ -345,6 +348,13 @@ static void soft_max_f32_cuda(const float *                                x,
     const int id       = ggml_cuda_get_device();
     const size_t smpbo = ggml_cuda_info().devices[id].smpbo;
 
+#if defined(GGML_USE_MUSA) && defined(GGML_MUSA_VEC_OPS)
+    // Vectorized path: one block per row, 4 consecutive columns per thread, values held in
+    // registers between the two reductions (single global read + single global write).
+    if (musa_soft_max_f32_vec(x, mask, sinks, dst, params, block_nums, stream)) {
+        return;
+    }
+#endif // GGML_USE_MUSA && GGML_MUSA_VEC_OPS
 
     if (nbytes_shared <= smpbo) {
         launch_soft_max_kernels<32, 64, 128, 256, 512, 1024, 2048, 4096>(x, mask, sinks, dst, params, stream, block_dims, block_nums, nbytes_shared);

@@ -1,5 +1,8 @@
 #include "unary.cuh"
 #include "convert.cuh"
+#if defined(GGML_USE_MUSA) && defined(GGML_MUSA_VEC_OPS)
+#include "ggml-musa/musa-ops.cuh"
+#endif // GGML_USE_MUSA && GGML_MUSA_VEC_OPS
 
 static __device__ __forceinline__ float op_abs(float x) {
     return fabsf(x);
@@ -279,6 +282,11 @@ static __global__ void unary_gated_op_kernel(const T * x, const T * g, T * dst, 
 
 template <float (*op)(float), typename T>
 static void unary_gated_cuda(const T * x, const T * g, T * dst, const int64_t k, const int64_t n, const int64_t o0, const int64_t o1, cudaStream_t stream) {
+#if defined(GGML_USE_MUSA) && defined(GGML_MUSA_VEC_OPS)
+    if (musa_glu_gated_vec_f32<op>(x, g, dst, k, n, o0, o1, stream)) {
+        return;
+    }
+#endif // GGML_USE_MUSA && GGML_MUSA_VEC_OPS
     const int64_t num_blocks = (k + CUDA_GLU_BLOCK_SIZE - 1) / CUDA_GLU_BLOCK_SIZE;
     const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params((dim3)num_blocks, CUDA_GLU_BLOCK_SIZE, 0, stream);
     ggml_cuda_kernel_launch(unary_gated_op_kernel<op, T>, launch_params, x, g, dst, k, n, o0, o1);
