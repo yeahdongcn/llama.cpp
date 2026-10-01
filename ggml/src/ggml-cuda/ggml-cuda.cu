@@ -2551,6 +2551,58 @@ static bool ggml_cuda_is_view_or_noop(const ggml_tensor * t) {
            t->op == GGML_OP_VIEW || t->op == GGML_OP_PERMUTE || t->op == GGML_OP_NONE;
 }
 
+#if defined(GGML_USE_MUSA) && defined(USE_CUDA_GRAPH)
+// Largest batch, in tokens, for which a MUSA graph is captured. 8 covers a decode step and leaves
+// room for speculative decoding; GGML_MUSA_GRAPHS_MAX_BATCH overrides it once per process instead of
+// requiring a rebuild, and 0 there captures every graph again.
+#define GGML_MUSA_GRAPHS_MAX_BATCH 8
+static int64_t ggml_musa_graphs_max_batch() {
+    static const int64_t value = [] {
+        const char * env = getenv("GGML_MUSA_GRAPHS_MAX_BATCH");
+        if (env != nullptr && *env != '\0') {
+            const long long parsed = atoll(env);
+            if (parsed >= 0) {
+                return (int64_t) parsed;
+            }
+        }
+        return (int64_t) GGML_MUSA_GRAPHS_MAX_BATCH;
+    }();
+    return value;
+}
+
+// True when the batch the graph was built for is small enough to be worth capturing.
+//
+// Capturing costs one pass over the node loop with the device idle, because the capture pass only
+// records the launches, plus cudaGraphInstantiate and cudaGraphExecUpdate. Measured on MTT S5000
+// with a 27B Q4_K_M prefill (512 tokens, 1314 nodes): that pass is 174.7 ms, instantiate 34.4 ms and
+// the exec update 35.7 ms, while the eager loop they replace is hidden behind the call's own device
+// work (a 316 ms host loop inside a 461 ms call) - so the capturing call costs 708 ms instead of
+// 461 ms and pp512 falls from 1105 to 980 tok/s. A decode graph captures once and replays hundreds
+// of times, so the same cost is amortized there.
+//
+// Every matmul in a llama.cpp graph carries the token count in src1->ne[1], so the largest of them
+// is the batch the graph was built for.
+static bool ggml_cuda_graph_check_batch(ggml_cgraph * cgraph) {
+    const int64_t max_batch = ggml_musa_graphs_max_batch();
+    if (max_batch <= 0) {
+        return true;
+    }
+
+    int64_t n_tokens = 0;
+    for (int i = 0; i < cgraph->n_nodes; i++) {
+        const ggml_tensor * node = cgraph->nodes[i];
+        if (node->op != GGML_OP_MUL_MAT && node->op != GGML_OP_MUL_MAT_ID) {
+            continue;
+        }
+        if (node->src[1] != nullptr) {
+            n_tokens = std::max(n_tokens, node->src[1]->ne[1]);
+        }
+    }
+
+    return n_tokens <= max_batch;
+}
+#endif // GGML_USE_MUSA && USE_CUDA_GRAPH
+
 #ifdef USE_CUDA_GRAPH
 static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
 
@@ -4451,7 +4503,11 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
 
     ggml_cuda_graph * graph = cuda_ctx->cuda_graph(graph_key);
     if (graph->is_enabled()) {
-        const bool graph_compatible = ggml_cuda_graph_check_compability(cgraph);
+        const bool graph_compatible = ggml_cuda_graph_check_compability(cgraph)
+#if defined(GGML_USE_MUSA)
+            && ggml_cuda_graph_check_batch(cgraph)
+#endif // GGML_USE_MUSA
+            ;
         if (graph_compatible) {
             const bool properties_changed = ggml_cuda_graph_update_required(cuda_ctx, cgraph);
 
