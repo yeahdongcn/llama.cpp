@@ -573,6 +573,15 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
     const int cc = ggml_cuda_info().devices[device].cc;
 
+    if (GGML_CUDA_CC_IS_MTHREADS(cc)) {
+        // __MUSA_ARCH__ exists only in the device pass, so the compile-time check in common.cuh cannot
+        // exclude the MUSA devices whose FlashAttention kernels are compiled to no-ops here:
+        // the host pass always defines FLASH_ATTN_AVAILABLE, so refuse them with the runtime cc instead.
+        if (cc < GGML_CUDA_CC_QY2) {
+            return BEST_FATTN_KERNEL_NONE;
+        }
+    }
+
     switch (K->ne[0]) {
         case  40:
         case  64:
@@ -716,6 +725,19 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
             }
         }
     }
+#if defined(GGML_USE_MUSA)
+    // The tile kernels are not enabled on MUSA: they are the ones that can take an MTT S5000 down.
+    // With `test-backend-ops test -b MUSA0 -o FLASH_ATTN_EXT`, an isolated
+    // `-p 'hsk=40,hsv=40,nh=4,nr23=[1,1],kv=113'` run never returns -- the host spins in the driver,
+    // the device stays idle and only killing the process frees the card. It reproduces with `kv=512`
+    // too, and the same build completes the 64-aligned head sizes the models here use, so only those
+    // (with a 256-aligned KV, which is what llama.cpp creates) are enabled. Shapes the vector kernel
+    // does not cover -- head sizes that are not 64-aligned, 192, and anything above 256 -- keep the
+    // existing CPU fallback instead of reaching the tile kernels.
+    if (!can_use_vector_kernel) {
+        return BEST_FATTN_KERNEL_NONE;
+    }
+#endif // defined(GGML_USE_MUSA)
     return BEST_FATTN_KERNEL_TILE;
 }
 

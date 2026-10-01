@@ -301,9 +301,12 @@ static const char * cu_get_error_str(CUresult err) {
 #define CP_ASYNC_AVAILABLE
 #endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
 
-#if !defined(GGML_CUDA_NO_FA) && !(defined(GGML_USE_MUSA) && __MUSA_ARCH__ < 220)
+// note: __MUSA_ARCH__ is only defined in the device pass, so the MUSA condition must test it explicitly,
+// otherwise FLASH_ATTN_AVAILABLE is never defined in the host pass and the backend reports no support
+// for GGML_OP_FLASH_ATTN_EXT. The host pass needs the runtime check in ggml_cuda_get_best_fattn_kernel.
+#if !defined(GGML_CUDA_NO_FA) && !(defined(GGML_USE_MUSA) && defined(__MUSA_ARCH__) && __MUSA_ARCH__ < 220)
 #define FLASH_ATTN_AVAILABLE
-#endif // !defined(GGML_CUDA_NO_FA) && !(defined(GGML_USE_MUSA) && __MUSA_ARCH__ < 220)
+#endif // !defined(GGML_CUDA_NO_FA) && !(defined(GGML_USE_MUSA) && defined(__MUSA_ARCH__) && __MUSA_ARCH__ < 220)
 
 static bool fp16_available(const int cc) {
     return ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_PASCAL ||
