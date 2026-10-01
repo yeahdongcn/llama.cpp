@@ -506,7 +506,7 @@ llama_context::~llama_context() {
 
 void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint32_t n_seqs) {
     const char * func = __func__;
-    auto resolve = [&](const llm_fused_op_probe & probe, bool & enabled) {
+    auto resolve = [&](const llm_fused_op_probe & probe, bool & enabled, bool warn_only = false) {
         if (!enabled) {
             return;
         }
@@ -546,8 +546,15 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
         }
 
         if (device_mismatch) {
-            enabled = false;
-            LLAMA_LOG_WARN("%s: %s not supported, set to disabled\n", func, probe.name);
+            if (warn_only) {
+                // the user asked for this explicitly, so only report the fallback instead of disabling it:
+                // the scheduler runs such ops on the other backend (in practice the CPU) without saying so
+                LLAMA_LOG_WARN("%s: %s is not supported by the requested device, the fallback path will be used\n",
+                        func, probe.name);
+            } else {
+                enabled = false;
+                LLAMA_LOG_WARN("%s: %s not supported, set to disabled\n", func, probe.name);
+            }
         } else {
             enabled = true;
             LLAMA_LOG_INFO("%s: %s enabled\n", func, probe.name);
@@ -557,6 +564,10 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
     if (cparams.auto_fa) {
         resolve(llm_fused_op_flash_attn_probe, cparams.flash_attn);
         cparams.auto_fa = false;
+    } else if (cparams.flash_attn) {
+        // -fa was requested explicitly: check the same way, but keep it enabled - the warning is what
+        // matters, because otherwise the fallback path is taken without any indication
+        resolve(llm_fused_op_flash_attn_probe, cparams.flash_attn, /* warn_only = */ true);
     }
 
     if (cparams.auto_fgdn) {
