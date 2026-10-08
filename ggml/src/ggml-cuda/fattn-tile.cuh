@@ -1014,10 +1014,19 @@ static __global__ void flash_attn_tile(
                 KQ_sum_combine[threadIdx.y] = KQ_sum[0];
             }
 
+#ifndef GGML_USE_MUSA
             return;
+#endif // GGML_USE_MUSA
         }
 
         __syncthreads();
+
+#ifdef GGML_USE_MUSA
+        // MUSA does not count exited warps as arrived at __syncthreads()
+        if (threadIdx.y % np != 0) {
+            return;
+        }
+#endif // GGML_USE_MUSA
 
 #pragma unroll
         for (int ip = 1; ip < np; ++ip) {

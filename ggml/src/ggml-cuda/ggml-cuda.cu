@@ -1572,6 +1572,34 @@ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const
                 ne12*ne13,
                 cu_compute_type,
                 CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+    } else if (GGML_CUDA_CC_IS_MTHREADS(cc)) {
+        // on muBLAS cublasGemmBatchedEx is much slower than cublasGemmStridedBatchedEx, so use strided calls:
+        // a single one if the r2 src1 matrices that share a src0 matrix are adjacent (one matrix with r2*ne11 columns),
+        // otherwise one per j < r2 batched over i02, or one per i02 batched over j if r2 > ne02
+        const bool    fold   = s12 == ne11*s11;
+        const bool    over_j = !fold && r2 > ne02;
+        const int64_t ncalls = fold ? 1 : (over_j ? ne02 : r2);
+        const int64_t nbatch = over_j ? r2 : ne02;
+        const int64_t n      = fold ? r2*ne11 : ne11;
+        const int64_t sa     = over_j ? 0 : s02; // src0 batch stride
+        const int64_t sb     = over_j ? 1 : r2;  // src1/dst batch stride in dim-2 strides
+
+        for (int64_t i13 = 0; i13 < ne13; ++i13) {
+            for (int64_t c = 0; c < ncalls; ++c) {
+                const int64_t i02 = over_j ? c    : 0;
+                const int64_t i12 = over_j ? c*r2 : c;
+
+                CUBLAS_CHECK(
+                cublasGemmStridedBatchedEx(cublas_h, CUBLAS_OP_T, CUBLAS_OP_N,
+                        ne01, n, ne10,
+                        alpha, src0_ptr + (i13/r3)*s03 + i02*s02, cu_data_type_a, s01, sa,
+                               src1_ptr + i13*s13      + i12*s12, cu_data_type_b, s11, sb*s12,
+                        beta,  dst_ptr  + i13*nbd3     + i12*nbd2, cu_data_type,  ldc, sb*ne1*ldc,
+                        nbatch,
+                        cu_compute_type,
+                        CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+            }
+        }
     } else {
         // use cublasGemmBatchedEx
         const int64_t ne23 = ne12*ne13;
