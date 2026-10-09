@@ -1174,7 +1174,8 @@ void launch_fattn(
             // Round down to a multiple of ntiles_dst so that each output tile gets the same number of blocks (avoids fixup).
             // Only do this if the occupancy loss from rounding is acceptable.
             const int nblocks_stream_k_rounded = (nblocks_stream_k_raw / ntiles_dst) * ntiles_dst;
-            const int max_efficiency_loss_percent = 5;
+            // MUSA: the fixup for blocks with fractional tiles is slow, prefer the same number of blocks for every tile.
+            const int max_efficiency_loss_percent = GGML_CUDA_CC_IS_MTHREADS(cc) ? 50 : 5;
             const int efficiency_loss_percent = nblocks_stream_k_rounded > 0
                 ? 100 * (nblocks_stream_k_raw - nblocks_stream_k_rounded) / nblocks_stream_k_raw
                 : 100;

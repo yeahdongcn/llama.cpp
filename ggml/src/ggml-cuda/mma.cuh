@@ -223,6 +223,38 @@ namespace ggml_cuda_mma {
                 return -1;
             }
         }
+#elif defined(MUSA_MMA_AVAILABLE)
+        static constexpr int ne = I * J / 32;
+        T x[ne] = {0};
+
+        // Matrix C, each thread holds a single column for 16x8 and two columns for 16x16.
+        static constexpr __device__ bool supported() {
+            if (I == 16 && J ==  8) return true;
+            if (I == 16 && J == 16) return true;
+            return false;
+        }
+
+        static __device__ __forceinline__ int get_i(const int l) {
+            if constexpr (I == 16 && J == 8) {
+                return (l * 4) + (threadIdx.x / 8);
+            } else if constexpr (I == 16 && J == 16) {
+                return ((l / 2) * 4) + (threadIdx.x / 8);
+            } else {
+                NO_DEVICE_CODE;
+                return -1;
+            }
+        }
+
+        static __device__ __forceinline__ int get_j(const int l) {
+            if constexpr (I == 16 && J == 8) {
+                return threadIdx.x % 8;
+            } else if constexpr (I == 16 && J == 16) {
+                return ((l % 2) * 8) + (threadIdx.x % 8);
+            } else {
+                NO_DEVICE_CODE;
+                return -1;
+            }
+        }
 #else
         static constexpr int ne = I * J / 32;
         T x[ne] = {0};
@@ -384,6 +416,39 @@ namespace ggml_cuda_mma {
                 return -1;
             }
         }
+#elif defined(MUSA_MMA_AVAILABLE)
+        static constexpr int ne = I * J / WARP_SIZE;
+        half2 x[ne] = {{0.0f, 0.0f}};
+
+        // 16x8 is matrix A or matrix B for 16x16 output, 8x8 is matrix B for 16x8 output.
+        // The 8x8 layout is the same as on NVIDIA, for 16x8 the elements 1 and 2 are swapped.
+        static constexpr __device__ bool supported() {
+            if (I ==  8 && J == 8) return true;
+            if (I == 16 && J == 8) return true;
+            return false;
+        }
+
+        static __device__ __forceinline__ int get_i(const int l) {
+            if constexpr (I == 8 && J == 8) {
+                return threadIdx.x / 4;
+            } else if constexpr (I == 16 && J == 8) {
+                return ((l / 2) * 8) + (threadIdx.x / 4);
+            } else {
+                NO_DEVICE_CODE;
+                return -1;
+            }
+        }
+
+        static __device__ __forceinline__ int get_j(const int l) {
+            if constexpr (I == 8 && J == 8) {
+                return (l * 4) + (threadIdx.x % 4);
+            } else if constexpr (I == 16 && J == 8) {
+                return ((l % 2) * 4) + (threadIdx.x % 4);
+            } else {
+                NO_DEVICE_CODE;
+                return -1;
+            }
+        }
 #else
         static constexpr int ne = I * J / WARP_SIZE;
         half2 x[ne] = {{0.0f, 0.0f}};
@@ -451,6 +516,21 @@ namespace ggml_cuda_mma {
             return tile<I_, J_, half2, DATA_LAYOUT_I_MAJOR>::get_j(l);
         }
 #elif defined(AMD_MFMA_AVAILABLE)
+        static constexpr int ne = tile<I_, J_, half2, DATA_LAYOUT_I_MAJOR>::ne;
+        nv_bfloat162 x[ne] = {{0.0f, 0.0f}};
+
+        static constexpr __device__ bool supported() {
+            return tile<I_, J_, half2, DATA_LAYOUT_I_MAJOR>::supported();
+        }
+
+        static __device__ __forceinline__ int get_i(const int l) {
+            return tile<I_, J_, half2, DATA_LAYOUT_I_MAJOR>::get_i(l);
+        }
+
+        static __device__ __forceinline__ int get_j(const int l) {
+            return tile<I_, J_, half2, DATA_LAYOUT_I_MAJOR>::get_j(l);
+        }
+#elif defined(MUSA_MMA_AVAILABLE)
         static constexpr int ne = tile<I_, J_, half2, DATA_LAYOUT_I_MAJOR>::ne;
         nv_bfloat162 x[ne] = {{0.0f, 0.0f}};
 
@@ -756,6 +836,71 @@ namespace ggml_cuda_mma {
         NO_DEVICE_CODE;
         return tile<8, 8, half2>{};
     }
+#elif defined(MUSA_MMA_AVAILABLE)
+    // A thread holds 2 columns of the 16x16 C tile but 2 rows of the 16x8 A/B tile, so the values are exchanged with 4 shuffles.
+    static __device__ __forceinline__ tile<16, 8, half2> get_half2(const tile<16, 16, float, DATA_LAYOUT_J_MAJOR> & tile_float) {
+        // Pack the values for j and j + 8 into one half2, fetch the packs for j = 2*(threadIdx.x % 4) + {0, 1} and recombine them:
+        int packed[2][2];
+#pragma unroll
+        for (int c = 0; c < 2; ++c) {
+#pragma unroll
+            for (int u = 0; u < 2; ++u) {
+                const half2 tmp = make_half2(tile_float.x[2*u + c], tile_float.x[2*u + c + 4]);
+                packed[c][u] = *((const int *) &tmp);
+            }
+        }
+
+        const int u_send = (threadIdx.x / 8) % 2;
+        const int d_recv = (threadIdx.x % 4) / 2;
+
+        tile<16, 8, half2> ret;
+#pragma unroll
+        for (int c = 0; c < 2; ++c) {
+            int tmp[2];
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int src_laneid = (2*(threadIdx.x % 2) + (h ^ d_recv))*8 + threadIdx.x / 4;
+                tmp[h] = __shfl_sync(0xFFFFFFFF, (h ^ u_send) ? packed[c][1] : packed[c][0], src_laneid, WARP_SIZE);
+            }
+            const int lo_i = d_recv ? tmp[1] : tmp[0];
+            const int hi_i = d_recv ? tmp[0] : tmp[1];
+            const half2 lo = *((const half2 *) &lo_i);
+            const half2 hi = *((const half2 *) &hi_i);
+            ret.x[2*c + 0] =  __lows2half2(lo, hi);
+            ret.x[2*c + 1] = __highs2half2(lo, hi);
+        }
+        return ret;
+    }
+
+    // A thread holds 1 column of the 16x8 C tile but 1 row of the transposed 8x8 B tile, so the values are exchanged with 2 shuffles.
+    static __device__ __forceinline__ tile<8, 8, half2> get_transposed(const tile<16, 8, float> & tile_float) {
+        // Pack the values for i and i + 8 into one half2, fetch the packs for i = 2*(threadIdx.x % 4) + {0, 1} and recombine them:
+        int packed[2];
+#pragma unroll
+        for (int l = 0; l < 2; ++l) {
+            const half2 tmp = make_half2(tile_float.x[l], tile_float.x[l + 2]);
+            packed[l] = *((const int *) &tmp);
+        }
+
+        const int u_send = (threadIdx.x / 8) % 2;
+        const int d_recv = (threadIdx.x % 4) / 2;
+
+        int tmp[2];
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const int src_laneid = 16*(threadIdx.x % 2) + 8*(h ^ d_recv) + threadIdx.x / 4;
+            tmp[h] = __shfl_sync(0xFFFFFFFF, (h ^ u_send) ? packed[1] : packed[0], src_laneid, WARP_SIZE);
+        }
+        const int lo_i = d_recv ? tmp[1] : tmp[0];
+        const int hi_i = d_recv ? tmp[0] : tmp[1];
+        const half2 lo = *((const half2 *) &lo_i);
+        const half2 hi = *((const half2 *) &hi_i);
+
+        tile<8, 8, half2> ret;
+        ret.x[0] =  __lows2half2(lo, hi);
+        ret.x[1] = __highs2half2(lo, hi);
+        return ret;
+    }
 #else // Volta
     template <int I, int J>
     static __device__ __forceinline__ tile<I, J/2, half2> get_half2(const tile<I, J, float> & tile_float) {
@@ -814,6 +959,8 @@ namespace ggml_cuda_mma {
         asm volatile("ldmatrix.sync.aligned.m8n8.x2.b16 {%0, %1}, [%2];"
             : "=r"(xi[0]), "=r"(xi[1])
             : "l"(xs));
+#elif defined(MUSA_MMA_AVAILABLE)
+        load_generic(t, xs0, stride);
 #else
         GGML_UNUSED_VARS(t, xs0, stride);
         NO_DEVICE_CODE;
@@ -875,6 +1022,10 @@ namespace ggml_cuda_mma {
 #elif defined(AMD_MFMA_AVAILABLE)
         static_assert(sizeof(t.x) == 8, "bad ne");
         ggml_cuda_memcpy_1<8>(t.x, xs0 + t.get_i(0)*stride + t.get_j(0));
+#elif defined(MUSA_MMA_AVAILABLE)
+        // No ldmatrix on MUSA, the elements of a thread are not contiguous:
+        static_assert(dl == DATA_LAYOUT_I_MAJOR, "bad data layout");
+        load_generic(t, xs0, stride);
 #else
         GGML_UNUSED_VARS(t, xs0, stride);
         NO_DEVICE_CODE;
@@ -939,6 +1090,18 @@ namespace ggml_cuda_mma {
                 xh[2*l + 1] = ((const half *) xs0)[(2*t.get_j(l) + 1)*(2*stride) + t.get_i(l)];
             }
         }
+#elif defined(MUSA_MMA_AVAILABLE)
+        static_assert(I == 16, "bad tile width");
+        static_assert(dl == DATA_LAYOUT_I_MAJOR, "bad data layout");
+        // Assemble each 32 bit element in a register, 16 bit stores into t.x would put the tile into local memory:
+        uint32_t * xi = (uint32_t *) t.x;
+        const uint16_t * xs = (const uint16_t *) xs0;
+#pragma unroll
+        for (int l = 0; l < t.ne; ++l) {
+            const uint32_t lo = xs[(2*t.get_j(l) + 0)*(2*stride) + t.get_i(l)];
+            const uint32_t hi = xs[(2*t.get_j(l) + 1)*(2*stride) + t.get_i(l)];
+            xi[l] = lo | (hi << 16);
+        }
 #else
         GGML_UNUSED_VARS(t, xs0, stride);
         NO_DEVICE_CODE;
@@ -986,6 +1149,13 @@ namespace ggml_cuda_mma {
         static_assert(sizeof(t.x) == 8, "bad ne");
         const int offset_ij = offset + t.get_i(0)*stride + t.get_j(0);
         ggml_cuda_memcpy_1<8>(t.x, swizzle<stride>(xs0, offset_ij, t.get_i(0)));
+#elif defined(MUSA_MMA_AVAILABLE)
+        static_assert(dl == DATA_LAYOUT_I_MAJOR, "bad data layout");
+#pragma unroll
+        for (int l = 0; l < t.ne; ++l) {
+            const int offset_ij = offset + t.get_i(l)*stride + t.get_j(l);
+            t.x[l] = *swizzle<stride>(xs0, offset_ij, t.get_i(l));
+        }
 #else
         GGML_UNUSED_VARS(t, xs0, offset);
         NO_DEVICE_CODE;
@@ -1047,6 +1217,30 @@ namespace ggml_cuda_mma {
                     const int j = 2*t.get_j(l) + o;
                     xh[2*l + o] = ((const half *) xs0)[swizzle<2*stride, half>(2*offset + j*(2*stride) + t.get_i(l), j)];
                 }
+            }
+        }
+#elif defined(MUSA_MMA_AVAILABLE)
+        static_assert(I == 16, "bad tile width");
+        static_assert(dl == DATA_LAYOUT_I_MAJOR || dl == DATA_LAYOUT_J_MAJOR, "bad data layout");
+        if constexpr (dl == DATA_LAYOUT_J_MAJOR) {
+            // The tile is used as an MN-major matrix A, its 32 bit elements are contiguous in the transposed data:
+#pragma unroll
+            for (int l = 0; l < t.ne; ++l) {
+                const int offset_ij = offset + t.get_j(l)*stride + t.get_i(l);
+                t.x[l] = *swizzle<stride>(xs0, offset_ij, t.get_j(l));
+            }
+        } else {
+            uint32_t * xi = (uint32_t *) t.x;
+            const uint16_t * xs = (const uint16_t *) xs0;
+#pragma unroll
+            for (int l = 0; l < t.ne; ++l) {
+                uint32_t tmp[2];
+#pragma unroll
+                for (int o = 0; o < 2; ++o) {
+                    const int j = 2*t.get_j(l) + o;
+                    tmp[o] = xs[swizzle<2*stride, uint16_t>(2*offset + j*(2*stride) + t.get_i(l), j)];
+                }
+                xi[l] = tmp[0] | (tmp[1] << 16);
             }
         }
 #else
@@ -1310,6 +1504,12 @@ namespace ggml_cuda_mma {
             : "+r"(Dxi[0]), "+r"(Dxi[1]), "+r"(Dxi[2]), "+r"(Dxi[3])
             : "r"(Axi[2]), "r"(Axi[3]), "r"(Bxi[1]));
 #endif // __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
+#elif defined(MUSA_MMA_AVAILABLE)
+        const int * Axi = (const int *) A.x;
+        const int * Bxi = (const int *) B.x;
+        int       * Dxi = (int       *) D.x;
+        // Arguments after the pointers: no offsets, no saturation, A and B K-major (1), f16 (2):
+        __musa_wmma_m16n8k16_mma(Dxi, Axi, Bxi, Dxi, 0, 0, 0, 0, 0, 1, 2);
 #else
         GGML_UNUSED_VARS(D, A, B);
         NO_DEVICE_CODE;
@@ -1325,6 +1525,11 @@ namespace ggml_cuda_mma {
         asm("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};"
             : "+r"(Dxi[0]), "+r"(Dxi[1]), "+r"(Dxi[2]), "+r"(Dxi[3])
             : "r"(Axi[0]), "r"(Axi[1]), "r"(Axi[2]), "r"(Axi[3]), "r"(Bxi[0]), "r"(Bxi[1]));
+#elif defined(MUSA_MMA_AVAILABLE)
+        const int * Axi = (const int *) A.x;
+        const int * Bxi = (const int *) B.x;
+        int       * Dxi = (int       *) D.x;
+        __musa_wmma_m16n8k16_mma(Dxi, Axi, Bxi, Dxi, 0, 0, 0, 0, 0, 1, 3); // bf16 (3)
 #else
         GGML_UNUSED_VARS(D, A, B);
         NO_DEVICE_CODE;
@@ -1386,11 +1591,37 @@ namespace ggml_cuda_mma {
         const halfx4_t& a_frag = reinterpret_cast<const halfx4_t&>(A.x[0]);
         const halfx4_t& b_frag = reinterpret_cast<const halfx4_t&>(B.x[0]);
         acc_frag = __builtin_amdgcn_mfma_f32_16x16x16f16(a_frag, b_frag, acc_frag, 0, 0, 0);
+#elif defined(MUSA_MMA_AVAILABLE)
+        static_assert(dl_ab == DATA_LAYOUT_I_MAJOR, "bad data layout");
+        const int * Axi = (const int *) A.x;
+        const int * Bxi = (const int *) B.x;
+        int       * Dxi = (int       *) D.x;
+        __musa_wmma_m16n16k16_mma(Dxi, Axi, Bxi, Dxi, 0, 0, 0, 0, 0, 1, 2); // f16 (2)
 #else
         GGML_UNUSED_VARS(D, A, B);
         NO_DEVICE_CODE;
 #endif // TURING_MMA_AVAILABLE
     }
+
+#if defined(MUSA_MMA_AVAILABLE)
+    // A is MN-major: element l holds A[2*A.get_i(l) + {0, 1}][A.get_j(l)].
+    template <data_layout dl_d>
+    static __device__ __forceinline__ void mma(
+            tile<16, 16, float, dl_d> & D, const tile<16, 8, half2, DATA_LAYOUT_J_MAJOR> & A, const tile<16, 8, half2> & B) {
+        const int * Axi = (const int *) A.x;
+        const int * Bxi = (const int *) B.x;
+        int       * Dxi = (int       *) D.x;
+        __musa_wmma_m16n16k16_mma(Dxi, Axi, Bxi, Dxi, 0, 0, 0, 0, 0, 3, 2); // A MN-major (3), f16 (2)
+    }
+
+    static __device__ __forceinline__ void mma(
+            tile<16, 8, float> & D, const tile<16, 8, half2, DATA_LAYOUT_J_MAJOR> & A, const tile<8, 8, half2> & B) {
+        const int * Axi = (const int *) A.x;
+        const int * Bxi = (const int *) B.x;
+        int       * Dxi = (int       *) D.x;
+        __musa_wmma_m16n8k16_mma(Dxi, Axi, Bxi, Dxi, 0, 0, 0, 0, 0, 3, 2); // A MN-major (3), f16 (2)
+    }
+#endif // defined(MUSA_MMA_AVAILABLE)
 
     template <data_layout dl_ab, data_layout dl_d>
     static __device__ __forceinline__ void mma(
@@ -1434,6 +1665,12 @@ namespace ggml_cuda_mma {
         GGML_UNUSED_VARS(D, A, B);
         NO_DEVICE_CODE;
 #endif // defined(CDNA3) || defined(CDNA2)
+#elif defined(MUSA_MMA_AVAILABLE)
+        static_assert(dl_ab == DATA_LAYOUT_I_MAJOR, "bad data layout");
+        const int * Axi = (const int *) A.x;
+        const int * Bxi = (const int *) B.x;
+        int       * Dxi = (int       *) D.x;
+        __musa_wmma_m16n16k16_mma(Dxi, Axi, Bxi, Dxi, 0, 0, 0, 0, 0, 1, 3); // bf16 (3)
 #else
         GGML_UNUSED_VARS(D, A, B);
         NO_DEVICE_CODE;

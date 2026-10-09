@@ -101,6 +101,7 @@
 
 // Moore Threads
 #define MUSART_HMASK 40300 // MUSA rc4.3, min. ver. for half2 -> uint mask comparisons
+#define MUSART_MMA   50200 // MUSA 5.2, min. ver. for which the warp-level MMA builtins are known to work (may be higher than needed)
 
 #define GGML_CUDA_CC_QY1 (GGML_CUDA_CC_OFFSET_MTHREADS + 0x210) // MTT S80, MTT S3000
 #define GGML_CUDA_CC_QY2 (GGML_CUDA_CC_OFFSET_MTHREADS + 0x220) // MTT S4000
@@ -301,6 +302,10 @@ static const char * cu_get_error_str(CUresult err) {
 #define CP_ASYNC_AVAILABLE
 #endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
 
+#if defined(GGML_USE_MUSA) && defined(__MUSA_ARCH__) && __MUSA_ARCH__ == 310 && defined(MUSART_VERSION) && MUSART_VERSION >= MUSART_MMA
+#define MUSA_MMA_AVAILABLE
+#endif // defined(GGML_USE_MUSA) && defined(__MUSA_ARCH__) && __MUSA_ARCH__ == 310 && defined(MUSART_VERSION) && MUSART_VERSION >= MUSART_MMA
+
 #if !defined(GGML_CUDA_NO_FA) && !(defined(GGML_USE_MUSA) && defined(__MUSA_ARCH__) && __MUSA_ARCH__ < 220)
 #define FLASH_ATTN_AVAILABLE
 #endif // !defined(GGML_CUDA_NO_FA) && !(defined(GGML_USE_MUSA) && defined(__MUSA_ARCH__) && __MUSA_ARCH__ < 220)
@@ -376,6 +381,15 @@ static bool cp_async_available(const int cc) {
 static bool blackwell_mma_available(const int cc) {
     return GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_BLACKWELL &&
            ggml_cuda_highest_compiled_arch(cc) < GGML_CUDA_CC_RUBIN;
+}
+
+static bool musa_mma_available(const int cc) {
+#if defined(GGML_USE_MUSA) && defined(MUSART_VERSION) && MUSART_VERSION >= MUSART_MMA
+    return cc == GGML_CUDA_CC_PH1;
+#else
+    GGML_UNUSED(cc);
+    return false;
+#endif // defined(GGML_USE_MUSA) && defined(MUSART_VERSION) && MUSART_VERSION >= MUSART_MMA
 }
 
 // Checks whether the tensor's base data pointer and higher-dimensional strides are byte-aligned to `alignment` bytes.

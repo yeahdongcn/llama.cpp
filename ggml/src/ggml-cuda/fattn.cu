@@ -168,7 +168,7 @@ static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1(ggml_backend_cuda_con
 #endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
 
     if constexpr (ncols2 <= 8) {
-        if (turing_mma_available(cc) && Q->ne[1] <= 8/ncols2) {
+        if ((turing_mma_available(cc) || musa_mma_available(cc)) && Q->ne[1] <= 8/ncols2) {
             ggml_cuda_flash_attn_ext_mma_f16_case<DKQ, DV, 8/ncols2, ncols2>(ctx, dst);
             return;
         }
@@ -704,6 +704,23 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     if ((amd_wmma_available(cc) && gqa_opt_applies && Q->ne[0] <= 256) && Q->ne[0] != 40 && Q->ne[0] != 72 &&
             Q->ne[1] * gqa_ratio_eff > (Q->ne[0] <= 128 ? 8 : 16)) {
         return BEST_FATTN_KERNEL_MMA_F16;
+    }
+
+    // MUSA: for f16 K/V the MMA kernel also handles small batches, the vector kernel is only faster for single tokens
+    //     if K/V are not shared by many Q heads. Quantized K/V would need a conversion to f16 for each MMA call.
+    if (musa_mma_available(cc) && (Q->ne[0] == 64 || Q->ne[0] == 128 || Q->ne[0] == 256)) {
+        if (!ggml_is_quantized(K->type) && !ggml_is_quantized(V->type)) {
+            if (can_use_vector_kernel && Q->ne[1] == 1 && Q->ne[3] == 1 && !(gqa_ratio > 4 && (Q->ne[0] >= 256 || K->ne[1] >= 8192))) {
+                return BEST_FATTN_KERNEL_VEC;
+            }
+            if (can_use_vector_kernel && !gqa_opt_applies && Q->ne[1] == 1) {
+                return BEST_FATTN_KERNEL_VEC;
+            }
+            return BEST_FATTN_KERNEL_MMA_F16;
+        }
+        if (Q->ne[1] * (gqa_opt_applies ? gqa_ratio_eff : 1) >= 16) {
+            return BEST_FATTN_KERNEL_MMA_F16;
+        }
     }
 
     // If there are no tensor cores available, use the generic tile kernel:
